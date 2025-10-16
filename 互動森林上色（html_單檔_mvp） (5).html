@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>互動森林上色｜紅色雷射筆追蹤＋四角定位（HTML 單檔）</title>
+  <style>
+    :root{
+      --bg:#0b1020; --panel:#121a2d; --bdr:#1c2a4a; --fg:#eaf6ff; --muted:#9eb3c9; --accent:#7fd7ff;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0; background:var(--bg); color:var(--fg); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;}
+    #stage{position:fixed; inset:0; overflow:hidden}
+    canvas{position:absolute; inset:0; width:100%; height:100%; touch-action:none;}
+    #view{z-index:1}
+    #hud{z-index:2; pointer-events:none}
+    #camLayer{z-index:0; opacity:.0}
+    #ui{position:fixed; right:16px; top:16px; background:color-mix(in oklab, var(--panel) 92%, transparent); border:1px solid var(--bdr); border-radius:14px; padding:12px 14px; box-shadow:0 10px 30px rgba(0,0,0,.35); max-width:400px; backdrop-filter:saturate(1.2) blur(6px); z-index:3}
+    #ui h3{margin:0 0 8px; font-size:16px}
+    #ui .row{display:grid; grid-template-columns: 1fr auto; align-items:center; gap:8px; margin:8px 0}
+    #ui label{font-size:13px; color:var(--muted)}
+    #ui input[type=range]{width:180px}
+    #ui select{padding:6px 8px; border-radius:8px; border:1px solid var(--bdr); background:#0f1730; color:var(--fg)}
+    #ui button, #ui .file{display:inline-flex; align-items:center; gap:8px; border:1px solid var(--bdr); background:#0f1730; color:var(--fg); padding:8px 10px; border-radius:10px; cursor:pointer}
+    #ui .hint{font-size:12px; color:var(--muted); line-height:1.3; margin-top:6px}
+    #badge{position:fixed; left:12px; bottom:10px; font-size:12px; color:#9fb4cc; opacity:.85; z-index:4}
+    a{color:var(--accent)}
+    .key{padding:1px 6px; border:1px solid var(--bdr); border-radius:6px; background:#0f1730; font-size:12px}
+
+    /* 折疊控制 */
+    #reopen{position:fixed; right:16px; top:16px; z-index:4; display:none; border:1px solid var(--bdr); background:#0f1730; color:#eaf6ff; padding:8px 10px; border-radius:10px; cursor:pointer; box-shadow:0 8px 20px rgba(0,0,0,.35)}
+    #ui.collapsed{display:none}
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="camLayer"></canvas>
+    <canvas id="view"></canvas>
+    <canvas id="hud"></canvas>
+  </div>
+
+  <button id="reopen" title="開啟設定">⚙️ 設定</button>
+
+  <div id="ui" class="collapsed">
+    <h3 style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+      <span>紅雷射筆追蹤＋四角定位</span>
+      <button id="collapseUI" title="收起面板">收起</button>
+    </h3>
+    <div class="row"><label>相機疊層透明度</label><input id="camOpacity" type="range" min="0" max="1" step="0.01" value="0"></div>
+    <div class="row"><label>鏡像相機（常見筆電前鏡頭）</label><input id="mirror" type="checkbox" checked></div>
+    <div class="row"><label>紅點最小紅度 ΔRG</label><input id="thrRG" type="range" min="10" max="150" step="1" value="70"></div>
+    <div class="row"><label>紅點最小紅度 ΔRB</label><input id="thrRB" type="range" min="10" max="150" step="1" value="80"></div>
+    <div class="row"><label>紅通道下限 R</label><input id="thrR" type="range" min="100" max="255" step="1" value="180"></div>
+    <div class="row"><label>偵測模式</label>
+      <select id="detectMode">
+        <option value="peak" selected>最亮點（抗暈光偏移）</option>
+        <option value="centroid">質心（大光斑用）</option>
+      </select>
+    </div>
+    <div class="row"><label>校正邊距 Overscan <span id="ovVal">5</span>%</label><input id="overscan" type="range" min="0" max="10" step="1" value="5"></div>
+    <div class="row"><label>色彩模式</label>
+      <select id="colorMode">
+        <option value="once" selected>單次映射（建議）</option>
+        <option value="accum">連續變色</option>
+      </select>
+    </div>
+    <div class="row"><label>自動穩定擷取（每點需 3 秒）</label><input id="autoCap" type="checkbox" checked></div>
+    <div class="row"><label>筆刷大小 <span id="szVal">42</span>px</label><input id="size" type="range" min="8" max="160" step="1" value="42" /></div>
+    <div class="row"><label>力度 <span id="stVal">0.7</span></label><input id="strength" type="range" min="0" max="1" step="0.01" value="0.7" /></div>
+    <div class="row"><label>筆觸柔邊</label><input id="soft" type="range" min="0.2" max="1.3" step="0.01" value="0.85" /></div>
+    <div class="row"><label>校正檢查格線</label><input id="showGrid" type="checkbox"></div>
+    <div class="row"><button id="startCalib">重新四角定位</button><button id="resetBg">重置DEMO森林</button></div>
+    <div class="hint">流程：<b>允許相機</b> → 依序把雷射筆對準 4 個角落目標（可 <span class="key">空白鍵</span> 手動擷取；或啟用「自動穩定擷取」）→ 完成後即可用雷射在畫面上「上色」。<br>每個點需在目標附近且穩定滿 <b>3 秒</b> 才會自動擷取。雙擊畫面切換全螢幕。若相機無法啟動：請使用 https 網址開啟檔案。</div>
+  </div>
+  <div id="badge">DPR:<span id="dpr"></span> ｜狀態：<span id="status">初始化</span></div>
+
+  <!-- 隱藏的相機元素與處理畫布 -->
+  <video id="cam" playsinline autoplay style="display:none"></video>
+  <canvas id="proc" style="display:none"></canvas>
+  <canvas id="base" style="display:none"></canvas>
+  <canvas id="mask" style="display:none"></canvas>
+
+<script>
+(() => {
+  // ====== DOM ======
+  const canvas = document.getElementById('view');
+  const hud = document.getElementById('hud');
+  const camLayer = document.getElementById('camLayer');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const hux = hud.getContext('2d');
+  const camx = camLayer.getContext('2d');
+  const video = document.getElementById('cam');
+  const proc = document.getElementById('proc');
+  const prox = proc.getContext('2d');
+  const base = document.getElementById('base');
+  const basx = base.getContext('2d');
+  const mask = document.getElementById('mask');
+  const msx  = mask.getContext('2d');
+
+  const ui = {
+    panel: document.getElementById('ui'),
+    reopen: document.getElementById('reopen'),
+    collapseUI: document.getElementById('collapseUI'),
+    camOpacity: document.getElementById('camOpacity'),
+    mirror: document.getElementById('mirror'),
+    thrRG: document.getElementById('thrRG'),
+    thrRB: document.getElementById('thrRB'),
+    thrR: document.getElementById('thrR'),
+    detectMode: document.getElementById('detectMode'),
+    overscan: document.getElementById('overscan'), ovVal: document.getElementById('ovVal'),
+    colorMode: document.getElementById('colorMode'),
+    showGrid: document.getElementById('showGrid'),
+    autoCap: document.getElementById('autoCap'),
+    size: document.getElementById('size'), szVal: document.getElementById('szVal'),
+    strength: document.getElementById('strength'), stVal: document.getElementById('stVal'),
+    soft: document.getElementById('soft'),
+    startCalib: document.getElementById('startCalib'),
+    resetBg: document.getElementById('resetBg'),
+    dpr: document.getElementById('dpr'),
+    status: document.getElementById('status'),
+  };
+
+  // 折疊面板
+  function setPanelCollapsed(collapsed){ if(collapsed){ ui.panel.classList.add('collapsed'); ui.reopen.style.display='inline-flex'; } else { ui.panel.classList.remove('collapsed'); ui.reopen.style.display='none'; } }
+  ui.reopen.addEventListener('click', ()=> setPanelCollapsed(false));
+  ui.collapseUI.addEventListener('click', ()=> setPanelCollapsed(true));
+  setPanelCollapsed(true);
+
+  // ====== Layout & DPI ======
+  let DPR = Math.max(1, window.devicePixelRatio || 1); ui.dpr.textContent = DPR.toFixed(2);
+  let W=0,H=0, cW=0, cH=0; // CSS 與實際像素
+
+  function setupCanvas(cvs){ const rect = cvs.getBoundingClientRect(); cvs.width = Math.round(rect.width * DPR); cvs.height = Math.round(rect.height * DPR); const c = cvs.getContext('2d'); c.setTransform(DPR,0,0,DPR,0,0); return {w: rect.width, h: rect.height, pw: cvs.width, ph: cvs.height}; }
+
+  function resizeAll(){
+    const v = setupCanvas(canvas); setupCanvas(hud); setupCanvas(camLayer);
+    W=v.w; H=v.h; cW=canvas.width; cH=canvas.height;
+    // 同步 offscreen 尺寸（以實際像素）
+    base.width=cW; base.height=cH; mask.width=cW; mask.height=cH; msx.clearRect(0,0,cW,cH);
+    drawDemoForest();
+    // 把目前畫面複製到 base
+    basx.clearRect(0,0,cW,cH); basx.drawImage(canvas, 0,0, cW, cH);
+  }
+
+  // ====== Paint Layer（綠→黃、橘→紅） ======
+  function rgb2hsv(r,g,b){ r/=255; g/=255; b/=255; const max=Math.max(r,g,b), min=Math.min(r,g,b); const d=max-min; let h=0, s=max===0?0:d/max, v=max; if(d!==0){switch(max){case r:h=(g-b)/d+(g<b?6:0);break;case g:h=(b-r)/d+2;break;case b:h=(r-g)/d+4;break;} h/=6;} return {h,s,v}; }
+  function hsv2rgb(h,s,v){ let r,g,b; let i=Math.floor(h*6); let f=h*6-i; let p=v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s); switch(i%6){case 0:r=v;g=t;b=p;break;case 1:r=q;g=v;b=p;break;case 2:r=p;g=v;b=t;break;case 3:r=p;g=q;b=v;break;case 4:r=t;g=p;b=v;break;case 5:r=v;g=p;b=q;break;} return {r:Math.round(r*255),g:Math.round(g*255),b:Math.round(b*255)}; }
+  const clamp01 = x=> x<0?0:(x>1?1:x); const lerp=(a,b,t)=> a+(b-a)*t; const smoothstep=(e0,e1,x)=>{ const t=clamp01((x-e0)/(e1-e0)); return t*t*(3-2*t); };
+  function mapHue(hDeg, s, v){ let H=hDeg; if(H>80&&H<160){H=lerp(H,60,0.6); s=s*1.10; v=v*1.08;} else if(H>20&&H<40){H=lerp(H,0,0.65); s=s*1.05;} else {H=H-10;} H=(H%360+360)%360; return {H, s:clamp01(s), v:clamp01(v)}; }
+
+  function drawDemoForest(){
+    // 可視畫布（有 DPR transform）
+    const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#c9e6ff'); g.addColorStop(1,'#eaf3ff'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#aac7b0'; for(let i=0;i<3;i++){ ctx.beginPath(); const baseY=H*0.45+i*18; ctx.moveTo(-50,baseY); for(let x=0;x<=W+50;x+=40){ const y=baseY-30*Math.sin((x+i*70)/90)-10*Math.cos(x/35); ctx.lineTo(x,y);} ctx.lineTo(W+50,H); ctx.lineTo(-50,H); ctx.closePath(); ctx.fill(); }
+    for(let i=0;i<12;i++){ const x=(i/12)*W+(Math.sin(i*12.3)*0.5+0.5)*W/24; ctx.fillStyle=i%2?'#7c5a3a':'#6d5033'; ctx.fillRect(x,H*0.35,10,H*0.65); }
+    for(let i=0;i<100;i++){ const x=Math.random()*W, y=H*0.2+Math.random()*H*0.6; const r=18+Math.random()*28; ctx.fillStyle=`hsl(${95+Math.random()*20} 50% ${35+Math.random()*20}%)`; blob(x,y,r,0.6); }
+    for(let i=0;i<45;i++){ const x=Math.random()*W, y=H*0.6+Math.random()*H*0.35; const r=10+Math.random()*22; ctx.fillStyle=`hsl(${22+Math.random()*6} 70% ${45+Math.random()*20}%)`; blob(x,y,r,0.5); }
+    function blob(cx,cy,r,a){ ctx.globalAlpha=a; ctx.beginPath(); ctx.ellipse(cx,cy,r*1.1,r,0,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
+  }
+
+  // ====== 新：以 Base(原圖) + Mask(覆蓋度) 組合，避免顏色被重覆「二次、三次」偏移 ======
+  function compositeRegion(x0d, y0d, wd, hd){
+    // 從 base 讀原圖、從 mask 讀覆蓋；計算輸出寫回可視 ctx
+    const baseData = basx.getImageData(x0d,y0d,wd,hd);
+    const maskData = msx.getImageData(x0d,y0d,wd,hd);
+    const outData  = ctx.getImageData(x0d,y0d,wd,hd); // 用於寫回
+    const bd=baseData.data, md=maskData.data, od=outData.data;
+    for(let i=0;i<bd.length; i+=4){
+      const sr=bd[i], sg=bd[i+1], sb=bd[i+2], sa=bd[i+3];
+      const hsv=rgb2hsv(sr,sg,sb); const mapped=mapHue(hsv.h*360, hsv.s, hsv.v); const rgb=hsv2rgb(mapped.H/360, mapped.s, mapped.v);
+      const k = (md[i]||0)/255; // 0..1 覆蓋（我們把覆蓋寫在 R 通道）
+      od[i]   = Math.round(sr*(1-k)+rgb.r*k);
+      od[i+1] = Math.round(sg*(1-k)+rgb.g*k);
+      od[i+2] = Math.round(sb*(1-k)+rgb.b*k);
+      od[i+3] = sa;
+    }
+    ctx.putImageData(outData, x0d, y0d);
+  }
+
+  function paintAt(cx, cy){
+    const size=parseFloat(ui.size.value); const strength=parseFloat(ui.strength.value); const softK=parseFloat(ui.soft.value);
+    // 轉為實際像素（考慮 DPR）
+    const rD = size * DPR; const cxD = cx * DPR; const cyD = cy * DPR;
+    const x0d = Math.max(0, Math.floor(cxD - rD)); const y0d = Math.max(0, Math.floor(cyD - rD));
+    const wd = Math.min(cW - x0d, Math.ceil(rD*2)); const hd = Math.min(cH - y0d, Math.ceil(rD*2)); if(wd<=0||hd<=0) return;
+
+    if(ui.colorMode.value === 'once'){
+      // 單次映射：更新 mask = max(mask, a*strength)，再依 base+mask 重算輸出
+      const mImg = msx.getImageData(x0d,y0d,wd,hd); const md=mImg.data;
+      for(let j=0;j<hd;j++){
+        for(let i=0;i<wd;i++){
+          const px = x0d + i, py = y0d + j; const dx = px - cxD, dy = py - cyD; const dist = Math.hypot(dx,dy); if(dist>rD) continue;
+          const a = smoothstep(rD, rD*softK, dist); if(a<=0) continue; const k = a*strength; const idx=(j*wd + i)*4;
+          const cur = md[idx]; const next = Math.max(cur, Math.round(k*255)); md[idx] = next; md[idx+1]=next; md[idx+2]=next; md[idx+3]=255;
+        }
+      }
+      msx.putImageData(mImg, x0d, y0d);
+      compositeRegion(x0d,y0d,wd,hd);
+    } else {
+      // 連續變色（舊邏輯，但修正為實際像素座標）
+      const img=ctx.getImageData(x0d,y0d,wd,hd); const d=img.data;
+      for(let j=0;j<hd;j++){
+        for(let i=0;i<wd;i++){
+          const px = x0d + i, py = y0d + j; const dx = px - cxD, dy = py - cyD; const dist = Math.hypot(dx,dy); if(dist>rD) continue; const a=smoothstep(rD, rD*softK, dist); if(a<=0) continue; const k=a*strength; const idx=(j*wd+i)*4;
+          const sr=d[idx], sg=d[idx+1], sb=d[idx+2], sa=d[idx+3]; const hsv=rgb2hsv(sr,sg,sb); const mapped=mapHue(hsv.h*360, hsv.s, hsv.v); const rgb=hsv2rgb(mapped.H/360, mapped.s, mapped.v);
+          d[idx]  = Math.round(sr*(1-k)+rgb.r*k); d[idx+1]=Math.round(sg*(1-k)+rgb.g*k); d[idx+2]=Math.round(sb*(1-k)+rgb.b*k); d[idx+3]=sa;
+        }
+      }
+      ctx.putImageData(img, x0d, y0d);
+    }
+  }
+
+  function strokeTo(p0,p1){ const size=parseFloat(ui.size.value); const step=Math.max(2,size*0.35); const dx=p1.x-p0.x, dy=p1.y-p0.y; const dist=Math.hypot(dx,dy); const n=Math.ceil(dist/step); for(let s=0;s<=n;s++){ const t=n? s/n:1; paintAt(p0.x+dx*t, p0.y+dy*t); } }
+
+  // ====== Camera & Red-Laser Detection ======
+  const PROC_W=320; let PROC_H=240; proc.width=PROC_W; proc.height=PROC_H; let videoReady=false;
+  async function startCam(){ try{ ui.status.textContent = isSecureContext? '啟動相機中…':'非安全環境，瀏覽器可能封鎖相機（請用 https）'; const stream = await navigator.mediaDevices.getUserMedia({ video: { width: {ideal: 1280}, height: {ideal: 720}, frameRate: {ideal: 30, max: 30} }, audio:false }); video.srcObject = stream; await video.play(); videoReady=true; PROC_H = Math.round(PROC_W * (video.videoHeight / video.videoWidth)); proc.height=PROC_H; ui.status.textContent='相機就緒；待校正'; }catch(e){ ui.status.textContent = '相機啟動失敗：'+ e.message; console.error(e); }}
+
+  function detectRedDot(){ if(!videoReady) return null; prox.save(); if(ui.mirror.checked){ prox.translate(PROC_W,0); prox.scale(-1,1);} prox.drawImage(video, 0,0, PROC_W, PROC_H); prox.restore(); const img = prox.getImageData(0,0,PROC_W,PROC_H); const d = img.data; const thrR=parseInt(ui.thrR.value), thrRG=parseInt(ui.thrRG.value), thrRB=parseInt(ui.thrRB.value); let sum=0,sx=0,sy=0,maxScore=0,mx=0,my=0; for(let y=0;y<PROC_H;y++){ for(let x=0;x<PROC_W;x++){ const idx=(y*PROC_W + x)*4; const r=d[idx], g=d[idx+1], b=d[idx+2]; if(r < thrR) continue; const drg=r-g, drb=r-b; if(drg < thrRG || drb < thrRB) continue; const score = drg + drb; sum+=score; sx+=x*score; sy+=y*score; if(score>maxScore){maxScore=score; mx=x; my=y;} }} if(sum<=0) return null; if(ui.detectMode.value==='peak'){ return {x:mx, y:my, strength:maxScore}; } else { return {x:sx/sum, y:sy/sum, strength: sum/(PROC_W*PROC_H)}; } }
+
+  // ====== Homography（相機→畫面 0..1，含可調 overscan） ======
+  function solveHomography(src,dst){ const A = new Array(8).fill(0).map(()=> new Float64Array(8)); const b = new Float64Array(8); for(let i=0;i<4;i++){ const x=src[i].x, y=src[i].y, X=dst[i].x, Y=dst[i].y; const r=i*2; A[r][0]=x;A[r][1]=y;A[r][2]=1;A[r][3]=0;A[r][4]=0;A[r][5]=0;A[r][6]=-X*x;A[r][7]=-X*y; b[r]=X; A[r+1][0]=0;A[r+1][1]=0;A[r+1][2]=0;A[r+1][3]=x;A[r+1][4]=y;A[r+1][5]=1;A[r+1][6]=-Y*x;A[r+1][7]=-Y*y; b[r+1]=Y; } for(let c=0;c<8;c++){ let piv=c; for(let r=c+1;r<8;r++){ if(Math.abs(A[r][c])>Math.abs(A[piv][c])) piv=r; } if(piv!==c){ const tmp=A[c]; A[c]=A[piv]; A[piv]=tmp; const tb=b[c]; b[c]=b[piv]; b[piv]=tb; } const div=A[c][c] || 1e-12; for(let k=c;k<8;k++) A[c][k]/=div; b[c]/=div; for(let r=0;r<8;r++){ if(r===c) continue; const f=A[r][c]; if(f===0) continue; for(let k=c;k<8;k++) A[r][k]-=f*A[c][k]; b[r]-=f*b[c]; } } const h=b; return {h11:h[0],h12:h[1],h13:h[2],h21:h[3],h22:h[4],h23:h[5],h31:h[6],h32:h[7]}; }
+  function warpCamToNorm(pt,H){ const {h11,h12,h13,h21,h22,h23,h31,h32} = H; const x=pt.x, y=pt.y; const w = h31*x + h32*y + 1; return { x:(h11*x + h12*y + h13)/w, y:(h21*x + h22*y + h23)/w }; }
+  function makeCorners(m){ return [ {x:m, y:m}, {x:1-m, y:m}, {x:1-m, y:1-m}, {x:m, y:1-m} ]; }
+
+  let overscan = 0.05; let targetsUI = makeCorners(overscan); let destSolve = makeCorners(overscan);
+  let camPts=[]; let Hn=null; let state='calib'; let calibIdx=0; let lastMapped=null; let painting=false;
+
+  // 穩定檢知
+  const tail=[]; const TAIL_MAX=12; const STABLE_STD=1.8; function updateStability(pt){ tail.push(pt); if(tail.length>TAIL_MAX) tail.shift(); if(tail.length<8) return {stable:false, std:Infinity}; const mx=tail.reduce((s,p)=>s+p.x,0)/tail.length; const my=tail.reduce((s,p)=>s+p.y,0)/tail.length; let v=0; for(const p of tail){ const dx=p.x-mx, dy=p.y-my; v+=dx*dx+dy*dy;} const std=Math.sqrt(v/tail.length); return {stable: std < STABLE_STD, std}; }
+  const HOLD_MS=3000; const CAPTURE_RADIUS=36; let holdStartMs=null;
+
+  // ====== Main Loop ======
+  let lastPaintPos=null; let showReprojTick=0;
+  function loop(){
+    requestAnimationFrame(loop);
+    camLayer.style.opacity = ui.camOpacity.value;
+    if(videoReady){ camx.save(); camx.clearRect(0,0,W,H); if(ui.mirror.checked){ camx.translate(W,0); camx.scale(-1,1);} const vw=video.videoWidth, vh=video.videoHeight; const r=Math.max(W/vw, H/vh); const dw=vw*r, dh=vh*r; const dx=(W-dw)/2, dy=(H-dh)/2; camx.filter='grayscale(100%) contrast(130%)'; camx.drawImage(video, dx,dy,dw,dh); camx.restore(); }
+
+    const det = detectRedDot(); hux.clearRect(0,0,W,H);
+
+    // 參考 ROI
+    const roi = [ {x:targetsUI[0].x*W, y:targetsUI[0].y*H}, {x:targetsUI[1].x*W, y:targetsUI[1].y*H}, {x:targetsUI[2].x*W, y:targetsUI[2].y*H}, {x:targetsUI[3].x*W, y:targetsUI[3].y*H} ];
+    hux.strokeStyle='rgba(127,215,255,.2)'; hux.lineWidth=1.5; hux.beginPath(); hux.moveTo(roi[0].x,roi[0].y); for(let i=1;i<4;i++) hux.lineTo(roi[i].x,roi[i].y); hux.closePath(); hux.stroke();
+
+    if(state==='calib'){
+      const t=targetsUI[calibIdx]; const tx=t.x*W, ty=t.y*H; const pulse=8+6*Math.sin(performance.now()/200);
+      hux.beginPath(); hux.arc(tx,ty, 20+pulse, 0, Math.PI*2); hux.strokeStyle='#7fd7ff'; hux.lineWidth=3; hux.stroke(); hux.beginPath(); hux.arc(tx,ty,6,0,Math.PI*2); hux.fillStyle='#7fd7ff'; hux.fill();
+      if(det){ const vw=video.videoWidth, vh=video.videoHeight; const r=Math.max(W/vw, H/vh); const dw=vw*r, dh=vh*r; const dx=(W-dw)/2, dy=(H-dh)/2; const cx_cam = det.x * (video.videoWidth/PROC_W); const cy_cam = det.y * (video.videoHeight/PROC_H); const cx_disp = dx + cx_cam*r; const cy_disp = dy + cy_cam*r; hux.beginPath(); hux.arc(cx_disp, cy_disp, 8, 0, Math.PI*2); hux.fillStyle='rgba(255,80,80,.9)'; hux.fill(); const near=Math.hypot(cx_disp-tx, cy_disp-ty) <= CAPTURE_RADIUS; const stab=updateStability({x:det.x, y:det.y}); const now=performance.now(); if(ui.autoCap.checked && near && stab.stable){ if(!holdStartMs) holdStartMs=now; } else { holdStartMs=null; } if(holdStartMs){ const f=Math.min(1,(now-holdStartMs)/HOLD_MS); hux.beginPath(); hux.lineWidth=6; hux.strokeStyle='#7fd7ff'; hux.arc(tx,ty,28,-Math.PI/2,-Math.PI/2+f*2*Math.PI); hux.stroke(); hux.fillStyle='#9fb4cc'; hux.font='12px system-ui'; hux.fillText(`穩定 ${(f*HOLD_MS/1000).toFixed(1)} / 3.0 秒`, tx+32, ty+4); } else { if(ui.autoCap.checked){ hux.fillStyle='#9fb4cc'; hux.font='12px system-ui'; hux.fillText(`請把紅點置於圈內並保持穩定 3 秒`, tx+32, ty+4);} }
+        if(ui.autoCap.checked && holdStartMs && (now - holdStartMs >= HOLD_MS)){ camPts.push({x:det.x, y:det.y}); calibIdx++; ui.status.textContent='已擷取 '+camPts.length+' / 4 點'; tail.length=0; holdStartMs=null; if(calibIdx>=4){ Hn=solveHomography(camPts, destSolve); state='paint'; ui.status.textContent='校正完成，可開始上色'; showReprojTick=120; } }
+      }
+    } else if(state==='paint'){
+      if(showReprojTick>0 && camPts.length===4 && Hn){ showReprojTick--; const re=camPts.map(p=> warpCamToNorm(p,Hn)); const pts=re.map(p=>({x:p.x*W,y:p.y*H})); hux.strokeStyle='rgba(127,215,255,.9)'; hux.lineWidth=2; hux.beginPath(); hux.moveTo(pts[0].x,pts[0].y); for(let i=1;i<4;i++) hux.lineTo(pts[i].x,pts[i].y); hux.closePath(); hux.stroke(); for(const q of pts){ hux.beginPath(); hux.arc(q.x,q.y,6,0,Math.PI*2); hux.fillStyle='rgba(127,215,255,.85)'; hux.fill(); } }
+
+      if(ui.showGrid.checked){ hux.strokeStyle='rgba(255,255,255,.12)'; hux.lineWidth=1; const n=6; for(let i=1;i<n;i++){ const t=i/n; const x=W*(targetsUI[0].x*(1-t)+targetsUI[1].x*t); hux.beginPath(); hux.moveTo(x,targetsUI[0].y*H); hux.lineTo(x,targetsUI[2].y*H); hux.stroke(); const y=H*(targetsUI[0].y*(1-t)+targetsUI[3].y*t); hux.beginPath(); hux.moveTo(targetsUI[0].x*W,y); hux.lineTo(targetsUI[1].x*W,y); hux.stroke(); } }
+
+      if(det && Hn){ const norm = warpCamToNorm({x:det.x, y:det.y}, Hn); if(norm.x>=targetsUI[0].x && norm.x<=targetsUI[1].x && norm.y>=targetsUI[0].y && norm.y<=targetsUI[2].y){ const px = norm.x * W; const py = norm.y * H; hux.beginPath(); hux.arc(px,py,8,0,Math.PI*2); hux.fillStyle='rgba(255,100,100,.9)'; hux.fill(); hux.beginPath(); hux.arc(px,py,18,0,Math.PI*2); hux.strokeStyle='rgba(255,100,100,.6)'; hux.lineWidth=2; hux.stroke(); const alpha=0.35; if(!lastMapped) lastMapped={x:px,y:py}; const sm={x:lastMapped.x*(1-alpha)+px*alpha, y:lastMapped.y*(1-alpha)+py*alpha}; if(lastPaintPos){ strokeTo(lastPaintPos, sm); } else { paintAt(sm.x, sm.y); } lastPaintPos = sm; lastMapped = sm; painting=true; } else { painting=false; lastPaintPos=null; } } else { painting=false; lastPaintPos=null; }
+    }
+  }
+
+  // 手動擷取（空白鍵）
+  window.addEventListener('keydown', (e)=>{ if(e.code==='Space' && state==='calib'){ const det = detectRedDot(); if(det){ camPts.push({x:det.x, y:det.y}); calibIdx++; ui.status.textContent='已擷取 '+camPts.length+' / 4 點（手動）'; tail.length=0; holdStartMs=null; if(calibIdx>=4){ Hn = solveHomography(camPts, destSolve); state='paint'; ui.status.textContent='校正完成，可開始上色'; showReprojTick=120; }} e.preventDefault(); } });
+
+  // UI 綁定
+  ui.size.addEventListener('input', ()=> ui.szVal.textContent = ui.size.value);
+  ui.strength.addEventListener('input', ()=> ui.stVal.textContent = ui.strength.value);
+  ui.resetBg.addEventListener('click', ()=> { drawDemoForest(); basx.clearRect(0,0,cW,cH); basx.drawImage(canvas,0,0,cW,cH); msx.clearRect(0,0,cW,cH); });
+  ui.startCalib.addEventListener('click', ()=> startCalibration());
+  ui.overscan.addEventListener('input', ()=>{ ui.ovVal.textContent = ui.overscan.value; const m=parseFloat(ui.overscan.value)/100; overscan=m; targetsUI = makeCorners(overscan); destSolve = makeCorners(overscan); });
+
+  function startCalibration(){ camPts=[]; Hn=null; state='calib'; calibIdx=0; holdStartMs=null; ui.status.textContent='請用雷射對準：角 '+(calibIdx+1)+' / 4'; }
+
+  // 載入自訂背景（可自行擴充：同步 base & 清空 mask）
+  // 你若要開放載入圖片，可把文件上版的載入器貼回來；這裡省略檔案 UI。
+
+  // 全螢幕
+  canvas.addEventListener('dblclick', ()=>{ if(!document.fullscreenElement){ document.documentElement.requestFullscreen().catch(()=>{});} else { document.exitFullscreen().catch(()=>{});} });
+
+  window.addEventListener('resize', ()=>{ DPR=Math.max(1,window.devicePixelRatio||1); ui.dpr.textContent=DPR.toFixed(2); resizeAll(); if(state==='paint'){ ui.status.textContent='視窗改變，建議重新校正'; }});
+
+  // ====== Boot ======
+  resizeAll();
+  startCam().then(()=>{ ui.ovVal.textContent=ui.overscan.value; startCalibration(); loop(); });
+})();
+</script>
+</body>
+</html>
